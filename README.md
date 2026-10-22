@@ -106,6 +106,12 @@ All settings sit at the top of the file:
   secrets file.
 * `LOGDIR`, `LOGPREFIX`, `DISCONNECT_EXE`, `SECRETS_FILE`: log folder, log file
   prefix, path to `Disconnect.exe` and path to `EventHandlers.secrets.ini`.
+  Use full paths: a relative path is resolved against the current folder of
+  the hMailServer service (usually `C:\Windows\System32`), not the `Events`
+  folder. Spaces are fine, but double every backslash, such as
+  `"C:\\Program Files (x86)\\hMailServer\\Events\\EventHandlers.secrets.ini"`.
+  The script creates `LOGDIR` if it's missing, but only its last folder: the
+  parent has to exist.
 * `LOCAL_DOMAINS`: the domains hosted on this server, lowercase and
   pipe-delimited, such as `"|example.com|example.org|"`. Used to spot a sender
   that fakes one of them.
@@ -310,7 +316,13 @@ Tous les paramètres se trouvent en tête de fichier :
   va dans le fichier de secrets.
 * `LOGDIR`, `LOGPREFIX`, `DISCONNECT_EXE`, `SECRETS_FILE` : dossier des logs,
   préfixe du fichier, chemin vers `Disconnect.exe` et chemin vers
-  `EventHandlers.secrets.ini`.
+  `EventHandlers.secrets.ini`. Mettez des chemins complets : un chemin relatif
+  part du dossier courant du service hMailServer (en général
+  `C:\Windows\System32`), pas du dossier `Events`. Les espaces ne posent pas de
+  problème, mais chaque antislash se double, par exemple
+  `"C:\\Program Files (x86)\\hMailServer\\Events\\EventHandlers.secrets.ini"`.
+  Le script crée `LOGDIR` s'il manque, mais seulement son dernier dossier : le
+  dossier parent doit exister.
 * `LOCAL_DOMAINS` : les domaines hébergés par ce serveur, en minuscules et
   délimités par des barres, par exemple `"|example.com|example.org|"`. Sert à
   repérer un expéditeur qui en usurpe un.
