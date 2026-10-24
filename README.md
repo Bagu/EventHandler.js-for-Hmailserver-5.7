@@ -16,7 +16,9 @@ per day.
 
 * Country blocking on every port (SMTP, IMAP, POP).
 * Geographic restriction on non-SMTP ports: mailbox access (IMAP/POP) is allowed
-  only from a configurable list of countries.
+  only from a configurable list of countries. When the country can't be read
+  (DNS error or IPv6 address), the connection gets a temporary refusal, without
+  a ban.
 * AbuseIPDB reputation check on the submission ports (587/465).
 * Auto-ban of unauthenticated / failed logins.
 * Recipient-probe (directory harvesting) protection: bans an IP after a number
@@ -24,7 +26,7 @@ per day.
   database. An unauthenticated sender that claims one of your own domains is
   banned at the first unknown recipient.
 * Connection-flood auto-ban: bans an IP that opens too many connections within a
-  sliding window. Catches brute-force bursts that never complete a login (for
+  sliding window on the SMTP ports (25/465/587 by default). Catches brute-force bursts that never complete a login (for
   example repeated pre-STARTTLS AUTH attempts answered with `504`), which do not
   trigger the failed-login handler. Uses a small counter file, no database.
 * Outbound `Received` header anonymisation (removes the client IP).
@@ -126,7 +128,9 @@ All settings sit at the top of the file:
   * plus feature-specific fields: `ABUSEIPDB` has `maxConfidence`, `maxAgeDays`;
     `RCPTPROBE` has `threshold`, `windowMin` and `spoofLocal` (ban at the first
     unknown recipient when the sender claims a domain from `LOCAL_DOMAINS`);
-    `CONNFLOOD` has `threshold`, `windowMin`; `SPAMREJECT` has `score`, `header`.
+    `CONNFLOOD` has `threshold`, `windowMin` and `ports` (the only ports
+    counted); `GEORESTRICT` has `failMsg` (temporary refusal when the country
+    can't be read); `SPAMREJECT` has `score`, `header`.
     `SPAMREJECT` is on by default with a score of 20: turn it off if no
     anti-spam layer adds a score header.
 * `RECEIVEDANON_ENABLED`, `MESSAGEID_ENABLED`, `SPAMREPORT_ENABLED`: on/off flags
@@ -143,17 +147,20 @@ All settings sit at the top of the file:
 
 > **Connection-flood tuning.** `CONNFLOOD.threshold` connections within
 > `CONNFLOOD.windowMin` minutes trigger a ban (defaults: 5 in 1 minute, banned for
-> 7 days). The LAN
+> 7 days). Only the ports in `CONNFLOOD.ports` are counted. The LAN
 > and localhost are exempt. Lower the threshold to be more aggressive; raise it if
-> a legitimate high-volume relay gets banned. This check runs on every connection,
-> so it adds one small file access (under a lock) per connect.
+> a legitimate high-volume relay gets banned. This check runs on every connection
+> to those ports, so it adds one small file access (under a lock) per connect.
 
 ### Order of checks on connect
 
 1. Local network and localhost are skipped.
-2. Connection flood: an IP over the connection threshold is banned.
+2. Connection flood: an IP over the connection threshold on `CONNFLOOD.ports`
+   is banned.
 3. Blocked country: rejected on any port.
-4. Non-SMTP port from a country outside the allowed list: rejected.
+4. Non-SMTP port from a country outside the allowed list: rejected. If the
+   country can't be read (code `xx`), the connection gets a temporary refusal
+   and no ban.
 5. Submission port with an IP listed on AbuseIPDB: rejected.
 
 ### Logging
@@ -179,10 +186,17 @@ separated by two or more spaces, so a log line can be split on `/ {2,}/`. The
   who reads mail over IMAP/POP from abroad. Keep the ban short, set
   `GEORESTRICT.ban.qty` to `0` to only disconnect, or `GEORESTRICT.action` to
   `"reject"` to avoid a persistent ban.
-* Connection-flood protection counts *every* connection, so a legitimate relay
-  that opens many short-lived connections could be banned. Raise
-  `CONNFLOOD.threshold` or widen `CONNFLOOD.windowMin` if that happens; set
-  `CONNFLOOD.enabled` to `false` to turn it off.
+* Connection-flood protection counts every connection on `CONNFLOOD.ports`, so
+  a legitimate relay that opens many short-lived connections could be banned.
+  Raise `CONNFLOOD.threshold` or widen `CONNFLOOD.windowMin` if that happens; set
+  `CONNFLOOD.enabled` to `false` to turn it off. IMAP and POP are not counted by
+  default: a mail client often opens several connections at once and would be
+  banned for nothing.
+* `xx` in the country column of the log means the country couldn't be read: the
+  DNS lookup failed or timed out, or the address is IPv6. On non-SMTP ports such
+  a connection is refused for now and can retry. To let it through instead, add
+  `xx` to `ALLOWED_GEO`. `zz` means the lookup worked but the service doesn't
+  know the IP.
 * Bans are stored as IP ranges and are removed automatically when they expire.
   Long ban durations on high-volume sources will accumulate more ranges.
 * Two simultaneous connections from the same host can both try to create the same
@@ -217,7 +231,9 @@ alignées.
 
 * Blocage par pays sur tous les ports (SMTP, IMAP, POP).
 * Restriction géographique sur les ports non-SMTP : l'accès aux boîtes
-  (IMAP/POP) n'est autorisé que depuis une liste de pays configurable.
+  (IMAP/POP) n'est autorisé que depuis une liste de pays configurable. Quand
+  le pays ne peut pas être lu (erreur DNS ou adresse IPv6), la connexion reçoit
+  un refus temporaire, sans ban.
 * Contrôle de réputation AbuseIPDB sur les ports de soumission (587/465).
 * Bannissement automatique des connexions non authentifiées.
 * Protection contre les sondes de destinataires (collecte d'adresses) : bannit
@@ -226,7 +242,8 @@ alignées.
   expéditeur non authentifié qui se réclame d'un de vos propres domaines est
   banni dès le premier destinataire inconnu.
 * Bannissement automatique des floods de connexions : bannit une IP qui ouvre
-  trop de connexions dans une fenêtre glissante. Attrape les rafales de force
+  trop de connexions dans une fenêtre glissante, sur les ports SMTP (25/465/587
+  par défaut). Attrape les rafales de force
   brute qui n'aboutissent jamais à une authentification (par exemple les
   tentatives AUTH répétées avant STARTTLS, auxquelles le serveur répond `504`),
   lesquelles ne déclenchent pas le gestionnaire d'échec d'authentification.
@@ -337,7 +354,9 @@ Tous les paramètres se trouvent en tête de fichier :
   * plus des champs propres à la fonction : `ABUSEIPDB` a `maxConfidence`,
     `maxAgeDays` ; `RCPTPROBE` a `threshold`, `windowMin` et `spoofLocal` (ban
     dès le premier destinataire inconnu si l'expéditeur annonce un domaine de
-    `LOCAL_DOMAINS`) ; `CONNFLOOD` a `threshold`, `windowMin` ; `SPAMREJECT` a
+    `LOCAL_DOMAINS`) ; `CONNFLOOD` a `threshold`, `windowMin` et `ports` (les
+    seuls ports comptés) ; `GEORESTRICT` a `failMsg` (refus temporaire quand le
+    pays ne peut pas être lu) ; `SPAMREJECT` a
     `score`, `header`. `SPAMREJECT` fonctionne par défaut, avec un score de 20 :
     désactivez-le si aucune couche anti-spam n'ajoute d'en-tête de score.
 * `RECEIVEDANON_ENABLED`, `MESSAGEID_ENABLED`, `SPAMREPORT_ENABLED` : drapeaux
@@ -356,17 +375,21 @@ Tous les paramètres se trouvent en tête de fichier :
 
 > **Réglage du flood de connexions.** `CONNFLOOD.threshold` connexions dans une
 > fenêtre de `CONNFLOOD.windowMin` minutes déclenchent un ban (par défaut : 5 en
-> 1 minute, ban de 7 jours). Le LAN et localhost sont exemptés. Baissez le seuil pour être plus
+> 1 minute, ban de 7 jours). Seuls les ports de `CONNFLOOD.ports` sont comptés.
+> Le LAN et localhost sont exemptés. Baissez le seuil pour être plus
 > agressif ; augmentez-le si un relais légitime à fort volume est banni. Ce
-> contrôle s'exécute à chaque connexion : il ajoute un petit accès fichier (sous
-> verrou) par connexion.
+> contrôle s'exécute à chaque connexion sur ces ports : il ajoute un petit accès
+> fichier (sous verrou) par connexion.
 
 ### Ordre des contrôles à la connexion
 
 1. Réseau local et localhost sont ignorés.
-2. Flood de connexions : une IP dépassant le seuil de connexions est bannie.
+2. Flood de connexions : une IP dépassant le seuil de connexions sur
+   `CONNFLOOD.ports` est bannie.
 3. Pays bloqué : rejet sur tous les ports.
-4. Port non-SMTP depuis un pays hors liste autorisée : rejet.
+4. Port non-SMTP depuis un pays hors liste autorisée : rejet. Si le pays ne
+   peut pas être lu (code `xx`), la connexion reçoit un refus temporaire, sans
+   ban.
 5. Port de soumission avec une IP listée sur AbuseIPDB : rejet.
 
 ### Journalisation
@@ -392,11 +415,18 @@ deux espaces séparent les champs, on peut donc découper une ligne sur
   utilisateur légitime qui relève son courrier en IMAP/POP depuis l'étranger.
   Gardez une durée de ban courte, mettez `GEORESTRICT.ban.qty` à `0` pour seulement
   déconnecter, ou `GEORESTRICT.action` à `"reject"` pour éviter un ban persistant.
-* La protection contre les floods de connexions compte *toutes* les connexions :
-  le script peut bannir un relais légitime qui ouvre beaucoup de connexions
-  courtes.
+* La protection contre les floods de connexions compte toutes les connexions
+  sur `CONNFLOOD.ports` : le script peut bannir un relais légitime qui ouvre
+  beaucoup de connexions courtes.
   Augmentez `CONNFLOOD.threshold` ou élargissez `CONNFLOOD.windowMin` le cas
-  échéant ; mettez `CONNFLOOD.enabled` à `false` pour la désactiver.
+  échéant ; mettez `CONNFLOOD.enabled` à `false` pour la désactiver. Par défaut,
+  le script ne compte ni IMAP ni POP. Un client mail y ouvre souvent plusieurs
+  connexions d'un coup, et serait banni pour rien.
+* `xx` dans la colonne pays du journal veut dire que le pays n'a pas pu être
+  lu : la requête DNS a échoué ou n'a pas répondu à temps, ou l'adresse est en
+  IPv6. Sur les ports non-SMTP, une telle connexion est refusée pour l'instant
+  et peut réessayer. Pour la laisser passer, ajoutez `xx` à `ALLOWED_GEO`. `zz`
+  veut dire que la requête a marché mais que le service ne connaît pas l'IP.
 * Les bans sont stockés en plages d'IP et supprimés automatiquement à
   expiration. Des durées longues sur des sources à fort volume accumulent
   davantage de plages.

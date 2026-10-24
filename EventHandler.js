@@ -46,18 +46,21 @@ var LOCAL_DOMAINS = "|example.com|example.org|";
  * le permettent (connexion, acceptation de message).
  * Unité de ban (DateAdd) : "d"=jour, "h"=heure, "n"=minute, "s"=seconde ; ban.qty=0 => pas de ban.
  * @const {{enabled:boolean,action:string,ban:{qty:number,unit:string},msg:string}} GEOBLOCK  pays interdits (tous ports)
- * @const {object} GEORESTRICT  ports non-SMTP réservés aux pays d'ALLOWED_GEO
+ * @const {object} GEORESTRICT  ports non-SMTP réservés aux pays d'ALLOWED_GEO ; + failMsg (refus
+ *                              temporaire, sans ban, quand le pays n'a pas pu être lu)
  * @const {object} ABUSEIPDB    réputation AbuseIPDB (ports de soumission) ; + maxConfidence, maxAgeDays
  * @const {object} UNKNOWNUSER  connexion non authentifiée (OnClientLogon)
  * @const {object} RCPTPROBE    sondes de destinataires (OnRecipientUnknown) ; + threshold, windowMin,
  *                              spoofLocal (ban au premier essai si l'expéditeur annonce un domaine local)
- * @const {object} CONNFLOOD    rafales de connexions par IP (OnClientConnect) ; + threshold, windowMin
+ * @const {object} CONNFLOOD    rafales de connexions par IP (OnClientConnect) ; + threshold, windowMin,
+ *                              ports (seuls ces ports sont comptés : un client IMAP ouvre plusieurs connexions)
  * @const {object} SPAMREJECT   score de spam élevé (OnAcceptMessage) ; + score, header
  */
 var GEOBLOCK    = { enabled: true,  action: "ban",    ban: { qty: 7, unit: "d" },
                     msg: "5.7.1 Connection refused: connections from your location are not accepted by this server." };
 var GEORESTRICT = { enabled: true,  action: "ban",    ban: { qty: 1, unit: "d" },
-                    msg: "5.7.1 Connection refused: access from your location is not permitted for this service." };
+                    msg: "5.7.1 Connection refused: access from your location is not permitted for this service.",
+                    failMsg: "4.7.0 Temporary failure: your location could not be checked, please try again later." };
 var ABUSEIPDB   = { enabled: true,  action: "ban",    ban: { qty: 1, unit: "d" },
                     maxConfidence: 40, maxAgeDays: 90,
                     msg: "5.7.1 Connection refused: your IP address has an unacceptable reputation (AbuseIPDB). If you believe this is an error, please contact the recipient by other means." };
@@ -67,7 +70,7 @@ var RCPTPROBE   = { enabled: true,  action: "ban",    ban: { qty: 1, unit: "d" }
                     threshold: 3, windowMin: 10, spoofLocal: true,
                     msg: "5.7.1 Access denied: too many invalid recipients." };
 var CONNFLOOD   = { enabled: true,  action: "ban",    ban: { qty: 7, unit: "d" },
-                    threshold: 5, windowMin: 1,
+                    threshold: 5, windowMin: 1, ports: "|25|465|587|",
                     msg: "5.7.1 Access denied: too many connections." };
 var SPAMREJECT  = { enabled: true, action: "reject", ban: { qty: 1, unit: "d" },
                     score: 20.0, header: "X-Spam-Score",
@@ -117,6 +120,14 @@ var ALLOWED_GEO       = "|fr|zz|";
 var SMTP_PORTS        = "|25|587|465|";
 var SUBMISSION_PORTS  = "|587|465|";
 var GEO_DNS_SUFFIX    = "country.junkemailfilter.com";
+
+/**
+ * Codes pays particuliers rendus par GeoLookup.
+ * @const {string} GEO_UNKNOWN  le service ne connaît pas l'IP (autorisé s'il figure dans ALLOWED_GEO)
+ * @const {string} GEO_FAILED   pays illisible (erreur DNS, IPv6) ; l'ajouter à ALLOWED_GEO laisse passer ces connexions
+ */
+var GEO_UNKNOWN = "zz";
+var GEO_FAILED  = "xx";
 
 /**
  * Journalisation par source : mettre false pour couper une catégorie de logs.
@@ -388,13 +399,13 @@ function ListedInAbuseIPDB(strIP) {
 
 /**
  * Résout le code pays d'une IPv4 via junkemailfilter.com (DNS TXT inversé).
- * Toute erreur, et toute adresse non IPv4, rend "zz" (autorisé par ALLOWED_GEO).
+ * Une IP inconnue du service rend GEO_UNKNOWN ; une erreur, ou une adresse non IPv4, rend GEO_FAILED.
  * @param {string} strIP
- * @returns {string}  code pays (2 lettres) ou "zz" si inconnu
+ * @returns {string}  code pays (2 lettres), GEO_UNKNOWN ou GEO_FAILED
  */
 function GeoLookup(strIP) {
-    var geo = "zz";
-    if (!isIPv4(strIP)) return geo;
+    var geo = GEO_UNKNOWN;
+    if (!isIPv4(strIP)) return GEO_FAILED;
     try {
         var a = String(strIP).split(".");
         var name = a[3] + "." + a[2] + "." + a[1] + "." + a[0] + "." + GEO_DNS_SUFFIX;
@@ -408,6 +419,7 @@ function GeoLookup(strIP) {
             if (Trim(group[i]) !== "") { geo = Trim(group[i]); break; }
         }
     } catch (e) {
+        geo = GEO_FAILED;
         Log("System", strIP, "", "", "GeoLookup error - " + e.description);
     }
     return Trim(String(geo)).toLowerCase();
@@ -795,9 +807,10 @@ function OnClientLogon(oClient) {
 
 /**
  * Filtrage à la connexion (le LAN et le bouclage sont exemptés) :
- * 0) bannit les IP qui dépassent le seuil de connexions (CONNFLOOD) ;
+ * 0) bannit les IP qui dépassent le seuil de connexions sur les ports de CONNFLOOD.ports ;
  * 1) rejette les pays de BLOCKED_COUNTRIES ;
- * 2) sur les ports non-SMTP, n'autorise que les pays d'ALLOWED_GEO ;
+ * 2) sur les ports non-SMTP, n'autorise que les pays d'ALLOWED_GEO, et refuse sans ban
+ *    (refus temporaire) quand le pays n'a pas pu être lu ;
  * 3) sur les ports de soumission (587/465), rejette les IP listées sur AbuseIPDB.
  * @param {object} oClient  informations client hMailServer
  */
@@ -808,7 +821,8 @@ function OnClientConnect(oClient) {
 
         var port = String(oClient.Port);
 
-        if (CONNFLOOD.enabled && ConnFloodCount(ip, port)) return;
+        if (CONNFLOOD.enabled && CONNFLOOD.ports.indexOf("|" + port + "|") > -1 &&
+            ConnFloodCount(ip, port)) return;
 
         var geo  = (GEOBLOCK.enabled || GEORESTRICT.enabled) ? GeoLookup(ip) : "-";
 
@@ -818,6 +832,10 @@ function OnClientConnect(oClient) {
         }
 
         if (GEORESTRICT.enabled && SMTP_PORTS.indexOf("|" + port + "|") === -1) {
+            if (geo === GEO_FAILED && ALLOWED_GEO.indexOf("|" + GEO_FAILED + "|") === -1) {
+                rejectSMTP(ip, "Geo unchecked " + port, geo, GEORESTRICT.failMsg, "Reject");
+                return;
+            }
             if (ALLOWED_GEO.indexOf("|" + geo + "|") === -1) {
                 enforce(GEORESTRICT, ip, "Geo restrict", "Geo restrict " + port, geo, true);
                 return;
