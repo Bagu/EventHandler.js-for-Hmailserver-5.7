@@ -21,7 +21,7 @@ let SOURCE = fs.readFileSync(path.join(__dirname, "..", "EventHandler.js"), "utf
  */
 function charger(code, opt) {
     opt = opt || {};
-    let files = {}, folders = {}, ranges = [], runs = [];
+    let files = {}, folders = {}, ranges = [], runs = [], http = [];
 
     function Fichier(p) {
         return {
@@ -73,6 +73,17 @@ function charger(code, opt) {
             };
         },
         "WScript.Shell": function () { return { Run: function (cmd) { runs.push(cmd); } }; },
+        "MSXML2.ServerXMLHTTP.6.0": function () {
+            let r = { status: 0, responseText: "" };
+            r.setTimeouts = function () {};
+            r.open = function (m, url) { r.url = url; };
+            r.send = function () {
+                http.push(r.url);
+                let rep = (opt.http || function () { return [200, "203.0.113.7"]; })(r.url);
+                r.status = rep[0]; r.responseText = rep[1];
+            };
+            return r;
+        },
         "DNSLibrary.DNSResolver": function () {
             return { TXT: opt.dns || function () { return "fr\r\n"; } };
         },
@@ -95,7 +106,13 @@ function charger(code, opt) {
     vm.createContext(ctx);
     vm.runInContext(code, ctx);
     files[ctx.SECRETS_FILE] = { data: "ADMIN_PASSWORD = secret\r\nABUSEIPDB_KEY = k\r\n", mtime: new Date() };
-    return { ctx: ctx, files: files, ranges: ranges, runs: runs };
+    return { ctx: ctx, files: files, ranges: ranges, runs: runs, http: http };
+}
+
+/** Lignes du journal d'événements écrites pendant un essai. */
+function journal(t) {
+    return Object.keys(t.files).filter(function (p) { return /events_\d+\.log$/.test(p); })
+        .map(function (p) { return t.files[p].data; }).join("");
 }
 
 /** Imitation d'un client hMailServer. */
@@ -176,6 +193,73 @@ let ESSAIS = {
         t.ctx.OnClientConnect(client("127.0.0.1", 993));
         return t.ctx.Result.Value === 0 && t.ranges.length === 0;
     },
+    "IP publique du site : aucun filtre, même en rafale": function (code) {
+        let t = charger(code, { dns: dnsPays(PAYS), abuse: function () { return true; } });
+        t.ctx.LOCAL_PUBLIC_IPS = "|203.0.113.7|";
+        for (let i = 0; i < 6; i++) t.ctx.OnClientConnect(client("203.0.113.7", 465));
+        t.ctx.OnClientConnect(client("203.0.113.7", 993));
+        return t.ctx.Result.Value === 0 && t.ranges.length === 0;
+    },
+    "IP publique voisine de celle du site : ban Conn flood": function (code) {
+        let t = charger(code, { dns: dnsPays(PAYS) });
+        t.ctx.LOCAL_PUBLIC_IPS = "|203.0.113.70|";
+        for (let i = 0; i < 5; i++) t.ctx.OnClientConnect(client("203.0.113.7", 465));
+        return t.ranges.length === 1 && t.ranges[0].Name === "(Conn flood) 203.0.113.7";
+    },
+    "IP publique auto : exemptée, service lu une seule fois": function (code) {
+        let t = charger(code, { dns: dnsPays(PAYS) });
+        t.ctx.LOCAL_PUBLIC_IPS = "|auto|";
+        for (let i = 0; i < 6; i++) t.ctx.OnClientConnect(client("203.0.113.7", 465));
+        return t.ctx.Result.Value === 0 && t.ranges.length === 0 && t.http.length === 1;
+    },
+    "IP publique auto : une autre IP reste bannie en rafale": function (code) {
+        let t = charger(code, { dns: dnsPays(PAYS) });
+        t.ctx.LOCAL_PUBLIC_IPS = "|auto|";
+        for (let i = 0; i < 5; i++) t.ctx.OnClientConnect(client("1.1.1.1", 465));
+        return t.ranges.length === 1 && t.ranges[0].Name === "(Conn flood) 1.1.1.1";
+    },
+    "IP publique auto : relue après PUBLIC_IP_TTL_MIN": function (code) {
+        let t = charger(code, { dns: dnsPays(PAYS) });
+        t.ctx.LOCAL_PUBLIC_IPS = "|auto|";
+        let vieux = Date.now() - (t.ctx.PUBLIC_IP_TTL_MIN + 1) * 60000;
+        t.files[t.ctx.LOGDIR + "\\" + t.ctx.PUBLIC_IP_FILE] = { data: "198.51.100.9\t" + vieux, mtime: new Date() };
+        t.ctx.OnClientConnect(client("203.0.113.7", 993));
+        return t.ctx.Result.Value === 0 && t.ranges.length === 0 && t.http.length === 1;
+    },
+    "IP publique auto : cache valide, pas d'appel": function (code) {
+        let t = charger(code, { dns: dnsPays(PAYS) });
+        t.ctx.LOCAL_PUBLIC_IPS = "|auto|";
+        t.files[t.ctx.LOGDIR + "\\" + t.ctx.PUBLIC_IP_FILE] = { data: "198.51.100.9\t" + Date.now(), mtime: new Date() };
+        for (let i = 0; i < 6; i++) t.ctx.OnClientConnect(client("198.51.100.9", 465));
+        return t.ranges.length === 0 && t.http.length === 0;
+    },
+    "IP publique auto : service en panne, un seul essai et une ligne au journal": function (code) {
+        let t = charger(code, { dns: dnsPays(PAYS), http: function () { throw { description: "timeout" }; } });
+        t.ctx.LOCAL_PUBLIC_IPS = "|auto|";
+        for (let i = 0; i < 3; i++) t.ctx.OnClientConnect(client("203.0.113.7", 993));
+        let lignes = journal(t).split("PublicIP error").length - 1;
+        return t.ctx.Result.Value === 0 && t.http.length === 1 && lignes === 1;
+    },
+    "IP publique auto : panne, la dernière IP connue reste exemptée": function (code) {
+        let t = charger(code, { dns: dnsPays(PAYS), http: function () { return [503, ""]; } });
+        t.ctx.LOCAL_PUBLIC_IPS = "|auto|";
+        let vieux = Date.now() - (t.ctx.PUBLIC_IP_TTL_MIN + 1) * 60000;
+        t.files[t.ctx.LOGDIR + "\\" + t.ctx.PUBLIC_IP_FILE] = { data: "198.51.100.9\t" + vieux, mtime: new Date() };
+        for (let i = 0; i < 6; i++) t.ctx.OnClientConnect(client("198.51.100.9", 465));
+        return t.ranges.length === 0 && t.http.length === 1;
+    },
+    "IP publique auto : réponse qui n'est pas une IP, ignorée": function (code) {
+        let t = charger(code, { dns: dnsPays(PAYS), http: function () { return [200, "<html>203.0.113.7</html>"]; } });
+        t.ctx.LOCAL_PUBLIC_IPS = "|auto|";
+        for (let i = 0; i < 5; i++) t.ctx.OnClientConnect(client("203.0.113.7", 465));
+        return t.ranges.length === 1 && t.http.length === 1;
+    },
+    "IP publique explicite : aucun appel au service": function (code) {
+        let t = charger(code, { dns: dnsPays(PAYS) });
+        t.ctx.LOCAL_PUBLIC_IPS = "|203.0.113.7|";
+        t.ctx.OnClientConnect(client("1.1.1.1", 993));
+        return t.http.length === 0;
+    },
     "rafale : 4 connexions SMTP, pas de ban": function (code) {
         let t = charger(code, { dns: dnsPays(PAYS) });
         for (let i = 0; i < 4; i++) t.ctx.OnClientConnect(client("1.1.1.1", 25));
@@ -250,7 +334,12 @@ let CASSES = [
     ["refus temporaire retiré", /if \(geo === GEO_FAILED && /, "if (false && "],
     ["rafale comptée sur tous les ports", /CONNFLOOD\.ports\.indexOf\("\|" \+ port \+ "\|"\) > -1/, "true"],
     ["contrôle de l'IP avant shell retiré", /if \(!isValidIP\(sIPAddress\)\) \{/, "if (false) {"],
-    ["pays bloqués ignorés", /BLOCKED_COUNTRIES\.indexOf\("\|" \+ geo \+ "\|"\) > -1/, "false"]
+    ["pays bloqués ignorés", /BLOCKED_COUNTRIES\.indexOf\("\|" \+ geo \+ "\|"\) > -1/, "false"],
+    ["IP publique du site non exemptée", /LOCAL_PUBLIC_IPS\.indexOf\("\|" \+ ip \+ "\|"\) > -1/, "false"],
+    ["IP publique du site comparée sans bornes", /LOCAL_PUBLIC_IPS\.indexOf\("\|" \+ ip \+ "\|"\)/, 'LOCAL_PUBLIC_IPS.indexOf("|" + ip)'],
+    ["IP publique auto relue à chaque connexion", /if \(now - stamp < PUBLIC_IP_TTL_MIN \* 60000\) return known;/, ""],
+    ["IP publique auto acceptée sans contrôle", /http\.status === 200 && isIPv4\(answer\)/, "http.status === 200"],
+    ["échec du service non mémorisé", /if \(ip === ""\) ip = known;/, 'if (ip === "") return known;']
 ];
 
 if (process.argv[2] === "contre-epreuve") {

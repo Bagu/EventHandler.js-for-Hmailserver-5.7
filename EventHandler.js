@@ -26,10 +26,21 @@ var SECRETS_FILE = "C:\\path\\to\\EventHandlers.secrets.ini";
  * @const {string} LOCAL_IP_PREFIX  préfixe des IP du LAN
  * @const {string} LOCALHOST_IP     adresse de bouclage IPv4
  * @const {string} LOCALHOST_IP6    adresse de bouclage IPv6
+ * @const {string} LOCAL_PUBLIC_IPS IP publiques du site entre barres verticales : le routeur
+ *                                  les donne aux appareils du LAN qui joignent le serveur
+ *                                  par son adresse publique (NAT loopback). "auto" la lit
+ *                                  sur PUBLIC_IP_URL
+ * @const {string} PUBLIC_IP_URL     service qui rend l'IP publique de l'appelant en texte brut
+ * @const {number} PUBLIC_IP_TTL_MIN durée (min) pendant laquelle l'IP lue est gardée, échec compris
+ * @const {string} PUBLIC_IP_FILE    fichier de cette IP et de sa date de lecture (dans LOGDIR)
  */
-var LOCAL_IP_PREFIX = "172.16.";
-var LOCALHOST_IP    = "127.0.0.1";
-var LOCALHOST_IP6   = "::1";
+var LOCAL_IP_PREFIX   = "172.16.";
+var LOCALHOST_IP      = "127.0.0.1";
+var LOCALHOST_IP6     = "::1";
+var LOCAL_PUBLIC_IPS  = "|auto|";
+var PUBLIC_IP_URL     = "https://api.ipify.org";
+var PUBLIC_IP_TTL_MIN = 60;
+var PUBLIC_IP_FILE    = "public_ip.dat";
 
 /**
  * Domaines hébergés par ce serveur, en minuscules, entre barres verticales.
@@ -338,13 +349,60 @@ function Log(source, ip, geo, dur, detail) {
 /* ====================  Sécurité et filtrage à l'entrée  =============== */
 
 /**
- * Indique si une IP appartient au réseau local exempté (LAN ou bouclage).
+ * Indique si une IP appartient au réseau local exempté (LAN, bouclage ou IP publique du site).
  * @param {string} ip
  * @returns {boolean}
  */
 function isLocalIP(ip) {
     return ip.substring(0, LOCAL_IP_PREFIX.length) === LOCAL_IP_PREFIX ||
-           ip === LOCALHOST_IP || ip === LOCALHOST_IP6;
+           ip === LOCALHOST_IP || ip === LOCALHOST_IP6 ||
+           LOCAL_PUBLIC_IPS.indexOf("|" + ip + "|") > -1 ||
+           (LOCAL_PUBLIC_IPS.indexOf("|auto|") > -1 && ip === PublicIP());
+}
+
+/**
+ * Rend l'IP publique du site, lue sur PUBLIC_IP_URL puis gardée PUBLIC_IP_TTL_MIN minutes
+ * dans PUBLIC_IP_FILE. Un échec est journalisé, n'est retenté qu'après ce délai et rend
+ * la dernière IP connue, ou "" s'il n'y en a pas.
+ * @returns {string}
+ */
+function PublicIP() {
+    var fso = new ActiveXObject("Scripting.FileSystemObject");
+    var path = LOGDIR + "\\" + PUBLIC_IP_FILE;
+    var now = new Date().getTime();
+    var known = "", stamp = 0;
+    try {
+        if (fso.FileExists(path)) {
+            var f = fso.OpenTextFile(path, 1);
+            var parts = f.AtEndOfStream ? [] : String(f.ReadAll()).split("\t");
+            f.Close();
+            if (parts.length === 2 && (Trim(parts[0]) === "" || isIPv4(Trim(parts[0])))) {
+                known = Trim(parts[0]);
+                stamp = Number(parts[1]) || 0;
+            }
+        }
+    } catch (eRead) {}
+    if (now - stamp < PUBLIC_IP_TTL_MIN * 60000) return known;
+
+    var ip = "";
+    try {
+        var http = new ActiveXObject("MSXML2.ServerXMLHTTP.6.0");
+        http.setTimeouts(2000, 2000, 2000, 2000);
+        http.open("GET", PUBLIC_IP_URL, false);
+        http.send();
+        var answer = Trim(String(http.responseText));
+        if (http.status === 200 && isIPv4(answer)) ip = answer;
+        else Log("System", "", "", "", "PublicIP error - HTTP " + http.status + " from " + PUBLIC_IP_URL);
+    } catch (e) {
+        Log("System", "", "", "", "PublicIP error - " + e.description);
+    }
+    if (ip === "") ip = known;
+    try {
+        var w = fso.CreateTextFile(path, true);
+        w.Write(ip + "\t" + now);
+        w.Close();
+    } catch (eWrite) {}
+    return ip;
 }
 
 /**

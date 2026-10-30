@@ -142,19 +142,29 @@ All settings sit at the top of the file:
   recipient-probe (`RCPT_DATA_FILE`, `RCPT_LOCK_FILE`) and connection-flood
   (`CONN_DATA_FILE`, `CONN_LOCK_FILE`), plus `BAN_LOCK_FILE`, `LOCK_TRIES`,
   `LOCK_WAIT_MS` (pause between two lock attempts), `LOCK_STALE_SEC`.
+* `LOCAL_PUBLIC_IPS`: your own public IP, pipe-delimited (`"|203.0.113.7|"`). A
+  device on your LAN that reaches the server by its public name goes through the
+  router's NAT loopback, which replaces the device's address with this one, so
+  every device at home arrives under the same IP. Without it, one phone sending
+  a few mails in a row can get the whole house banned for 7 days. The default,
+  `"|auto|"`, asks `PUBLIC_IP_URL` (`https://api.ipify.org`) for that IP and
+  keeps the answer `PUBLIC_IP_TTL_MIN` minutes (60) in `PUBLIC_IP_FILE`, so it
+  follows a dynamic IP. If the service is down, the last known IP stays exempt
+  and the script tries again after the same delay. With a fixed IP, write it
+  instead of `auto` and the script makes no outside call.
 * `RANGE_NAME_MAX` (100) and `LOG_DETAIL_MAX` (300): longest IP-range name and
   longest free-text detail in a log line. Longer text is cut.
 
 > **Connection-flood tuning.** `CONNFLOOD.threshold` connections within
 > `CONNFLOOD.windowMin` minutes trigger a ban (defaults: 5 in 1 minute, banned for
-> 7 days). Only the ports in `CONNFLOOD.ports` are counted. The LAN
-> and localhost are exempt. Lower the threshold to be more aggressive; raise it if
+> 7 days). Only the ports in `CONNFLOOD.ports` are counted. The LAN,
+> localhost and `LOCAL_PUBLIC_IPS` are exempt. Lower the threshold to be more aggressive; raise it if
 > a legitimate high-volume relay gets banned. This check runs on every connection
 > to those ports, so it adds one small file access (under a lock) per connect.
 
 ### Order of checks on connect
 
-1. Local network and localhost are skipped.
+1. Local network, localhost and `LOCAL_PUBLIC_IPS` are skipped.
 2. Connection flood: an IP over the connection threshold on `CONNFLOOD.ports`
    is banned.
 3. Blocked country: rejected on any port.
@@ -369,6 +379,16 @@ Tous les paramètres se trouvent en tête de fichier :
   flood de connexions (`CONN_DATA_FILE`, `CONN_LOCK_FILE`), plus
   `BAN_LOCK_FILE`, `LOCK_TRIES`, `LOCK_WAIT_MS` (pause entre deux essais de
   verrou), `LOCK_STALE_SEC`.
+* `LOCAL_PUBLIC_IPS` : votre IP publique, entre barres (`"|203.0.113.7|"`).
+  Quand un appareil du LAN joint le serveur par son nom public, le routeur (NAT
+  loopback) remplace l'adresse de l'appareil par celle-ci : tous les appareils de
+  la maison arrivent sous cette adresse. Sans ce réglage, un téléphone qui envoie
+  quelques mails à la suite peut faire bannir toute la maison pour 7 jours. Par
+  défaut, `"|auto|"` demande cette IP à `PUBLIC_IP_URL` (`https://api.ipify.org`)
+  et garde la réponse `PUBLIC_IP_TTL_MIN` minutes (60) dans `PUBLIC_IP_FILE` :
+  une IP dynamique est suivie. Si le service ne répond pas, la dernière IP connue
+  reste exemptée et le script réessaie après le même délai. Avec une IP fixe,
+  écrivez-la à la place de `auto` : le script ne fait alors aucun appel extérieur.
 * `RANGE_NAME_MAX` (100) et `LOG_DETAIL_MAX` (300) : longueur maximale d'un nom
   de plage d'IP et du détail libre d'une ligne de log. Le texte plus long est
   coupé.
@@ -376,14 +396,14 @@ Tous les paramètres se trouvent en tête de fichier :
 > **Réglage du flood de connexions.** `CONNFLOOD.threshold` connexions dans une
 > fenêtre de `CONNFLOOD.windowMin` minutes déclenchent un ban (par défaut : 5 en
 > 1 minute, ban de 7 jours). Seuls les ports de `CONNFLOOD.ports` sont comptés.
-> Le LAN et localhost sont exemptés. Baissez le seuil pour être plus
+> Le LAN, localhost et `LOCAL_PUBLIC_IPS` sont exemptés. Baissez le seuil pour être plus
 > agressif ; augmentez-le si un relais légitime à fort volume est banni. Ce
 > contrôle s'exécute à chaque connexion sur ces ports : il ajoute un petit accès
 > fichier (sous verrou) par connexion.
 
 ### Ordre des contrôles à la connexion
 
-1. Réseau local et localhost sont ignorés.
+1. Réseau local, localhost et `LOCAL_PUBLIC_IPS` sont ignorés.
 2. Flood de connexions : une IP dépassant le seuil de connexions sur
    `CONNFLOOD.ports` est bannie.
 3. Pays bloqué : rejet sur tous les ports.
